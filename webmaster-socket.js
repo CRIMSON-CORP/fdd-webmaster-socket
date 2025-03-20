@@ -5,216 +5,243 @@ const webSocketSecure = new WebSocketServer({
   port: 8080,
 });
 
-const conversations = [
-  {
-    id: "123",
-    members: ["123", "456"],
-    messages: [
-      {
-        id: "",
-        text: "",
-        message: "",
-        sender_id: "",
-        read: false,
-      },
-    ],
-  },
-  {
-    id: "456",
-    members: ["123", "456"],
-    messages: [
-      {
-        id: "",
-        text: "",
-        message: "",
-        sender_id: "",
-        read: false,
-      },
-    ],
-  },
-  {
-    id: "536345",
-    members: ["123", "456"],
-    messages: [
-      {
-        id: "",
-        text: "",
-        message: "",
-        sender_id: "",
-        read: false,
-      },
-    ],
-  },
-];
+const BACKEND_URL = process.env.BACKEND_URL;
 
+/**
+ * @type {Map<string, WebSocket>}
+ */
 const clients = new Map();
+/**
+ * @type {Map<string, WebSocket>}
+ */
+const deviceMap = new Map();
 
-webSocketSecure.on("connection", (webSocket, request) => {
-  const userId = url.parse(request.url, true).query.user;
-  console.log(`someone connected! ${userId}`);
+webSocketSecure.on("connection", async (webSocket, request) => {
+  const { deviceId, userId } = url.parse(request.url, true).query;
+
+  webSocket.deviceId = deviceId;
+  webSocket.userId = userId;
+
   clients.set(userId, webSocket);
+  deviceMap.set(deviceId, webSocket);
 
-  webSocket.on("message", (data) => {
+  webSocket.on("message", async (data) => {
     const json = JSON.parse(Buffer.from(data).toString());
-
-    const conversation = conversations.find(
-      (conversation) => conversation.id === json.conversation_id
-    );
 
     switch (json.type) {
       case "send_message":
-        conversation?.members?.forEach((member) => {
-          const ws = clients.get(member);
-          ws?.send(
-            JSON.stringify({
-              ...json,
-              type: "message_sent",
-              message: json.message,
-              read: false,
-              message_id: json.message_id,
-              conversation_id: json.conversation_id,
-              sender_id: json.sender_id,
-              time: json.time,
-              ...(json.reply && { reply: json.reply }),
-            })
-          );
-        });
+        {
+          const payload = {
+            ...json,
+            type: "message_sent",
+            message: json.message,
+            read: false,
+            message_id: json.message_id,
+            conversation_id: json.conversation_id,
+            sender_id: json.sender_id,
+            time: json.time,
+            deviceId: webSocket.deviceId,
+            ...(json.reply && { reply: json.reply }),
+            ...(json.files && { files: json.files }),
+          };
+
+          const response = await fetch(`${BACKEND_URL}/messages/send`, {
+            method: "POST",
+            body: JSON.stringify({
+              message_id: payload.message_id,
+              conversation_id: payload.conversation_id,
+              message: payload.message,
+              sender_id: payload.sender_id,
+              time: payload.time,
+              ...(payload.reply && { parent_id: payload.reply.id }),
+              ...(payload.files && { file: payload.files }),
+            }),
+            headers: {
+              "content-type": "application/json",
+            },
+          });
+
+          const data = await response.data;
+
+          const involvedSockets = [
+            clients.get(data.data.conversation_user_id),
+            clients.get(data.data.conversation_admin_id),
+          ];
+
+          involvedSockets.forEach((socket) => {
+            socket.readyState === socket.OPEN &&
+              socket?.send(JSON.stringify(payload));
+          });
+        }
         break;
       case "delivered_message":
-        conversation.members.forEach((member) => {
-          const ws = clients.get(member);
-          setTimeout(() => {
-            ws?.send(
-              JSON.stringify({
-                ...json,
-                type: "message_delivered",
-                message: json.message,
-                read: false,
-                message_id: json.message_id,
-                conversation_id: json.conversation_id,
-                sender_id: json.sender_id,
-                time: json.time,
-                ...(json.reply && { reply: json.reply }),
-              })
-            );
-          }, 500);
-        });
+        {
+          const payload = {
+            type: "message_delivered",
+            message_id: json.message_id,
+            conversation_id: json.conversation_id,
+            sender_id: json.sender_id,
+            deviceId: webSocket.deviceId,
+          };
+
+          const response = await fetch(`${BACKEND_URL}/messages/delivered`, {
+            method: "POST",
+            body: JSON.stringify({
+              message_id: payload.message_id,
+              conversation_id: payload.conversation_id,
+              sender_id: payload.sender_id,
+            }),
+            headers: {
+              "content-type": "application/json",
+            },
+          });
+
+          const data = await response.data;
+
+          const involvedSockets = [
+            clients.get(data.data.conversation_user_id),
+            clients.get(data.data.conversation_admin_id),
+          ];
+
+          involvedSockets.forEach((socket) => {
+            socket.readyState === socket.OPEN &&
+              socket?.send(JSON.stringify(payload));
+          });
+        }
         break;
       case "read_message":
-        conversation.members.forEach((member) => {
-          const ws = clients.get(member);
-          setTimeout(() => {
-            ws?.send(
-              JSON.stringify({
-                type: "message_read",
-                message: json.message,
-                read: false,
-                message_id: json.message_id,
-                conversation_id: json.conversation_id,
-                sender_id: json.sender_id,
-                time: json.time,
-                ...(json.reply && { reply: json.reply }),
-              })
-            );
-          }, 500);
-        });
-        break;
-      case "read_conversation":
-        conversation?.members?.forEach((member) => {
-          const ws = clients.get(member);
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(
-              JSON.stringify({
-                type: "conversatoin_read",
-                conversation_id: json.conversation_id,
-                sender_id: json.sender_id,
-              })
-            );
-          }
-        });
+        {
+          const payload = {
+            type: "message_read",
+            conversation_id: json.conversation_id,
+            sender_id: json.sender_id,
+            deviceId: webSocket.deviceId,
+          };
+
+          const response = await fetch(`${BACKEND_URL}/messages/read-all`, {
+            method: "POST",
+            body: JSON.stringify({
+              conversation_id: payload.conversation_id,
+              sender_id: payload.sender_id,
+            }),
+            headers: {
+              "content-type": "application/json",
+            },
+          });
+
+          const data = await response.data;
+
+          const involvedSockets = [
+            clients.get(data.data.conversation_user_id),
+            clients.get(data.data.conversation_admin_id),
+          ];
+
+          involvedSockets.forEach((socket) => {
+            socket.readyState === socket.OPEN &&
+              socket?.send(JSON.stringify(payload));
+          });
+        }
         break;
       case "focus":
-        conversation.members.forEach((member) => {
-          const ws = clients.get(member);
-
-          ws?.send(
-            JSON.stringify({
-              type: "focus",
-              conversation_id: json.conversation_id,
-              sender_id: json.sender_id,
-            })
-          );
-        });
-        break;
       case "active-typing":
-        conversation.members.forEach((member) => {
-          const ws = clients.get(member);
-          ws?.send(
-            JSON.stringify({
-              type: "active-typing",
-              conversation_id: json.conversation_id,
-              sender_id: json.sender_id,
-            })
-          );
-        });
-        break;
       case "idle-typing":
-        conversation.members.forEach((member) => {
-          const ws = clients.get(member);
-          ws?.send(
-            JSON.stringify({
-              type: "idle-typing",
-              conversation_id: json.conversation_id,
-              sender_id: json.sender_id,
-            })
-          );
-        });
-        break;
       case "blur":
-        conversation.members.forEach((member) => {
-          const ws = clients.get(member);
-          ws?.send(
-            JSON.stringify({
-              type: "blur",
-              conversation_id: json.conversation_id,
-              sender_id: json.sender_id,
-            })
+        {
+          const payload = {
+            type: json.type,
+            conversation_id: json.conversation_id,
+            sender_id: json.sender_id,
+            deviceId: webSocket.deviceId,
+          };
+
+          const response = await fetch(
+            `${BACKEND_URL}/conversation/${json.conversation_id}`,
+            {
+              method: "GET",
+              headers: {
+                "content-type": "application/json",
+              },
+            }
           );
-        });
+
+          const data = await response.data;
+
+          const involvedSockets = [
+            clients.get(data.data.conversation_user_id),
+            clients.get(data.data.conversation_admin_id),
+          ];
+
+          involvedSockets.forEach((socket) => {
+            socket.readyState === socket.OPEN &&
+              socket?.send(JSON.stringify(payload));
+          });
+        }
         break;
       case "edit_message":
-        conversation.members.forEach((member) => {
-          const ws = clients.get(member);
-          setTimeout(() => {
-            ws?.send(
-              JSON.stringify({
-                type: "edit_message",
-                message: json.message,
-                read: false,
-                message_id: json.message_id,
-                conversation_id: json.conversation_id,
-                sender_id: json.sender_id,
-              })
-            );
-          }, 1000);
-        });
+        {
+          const payload = {
+            type: "edit_message",
+            message: json.message,
+            message_id: json.message_id,
+            conversation_id: json.conversation_id,
+            sender_id: json.sender_id,
+            deviceId: webSocket.deviceId,
+          };
+
+          const response = await fetch(`${BACKEND_URL}/messages/update`, {
+            method: "POST",
+            body: JSON.stringify({
+              message: payload.message,
+              message_id: payload.message,
+            }),
+            headers: {
+              "content-type": "application/json",
+            },
+          });
+
+          const data = await response.data;
+
+          const involvedSockets = [
+            clients.get(data.data.conversation_user_id),
+            clients.get(data.data.conversation_admin_id),
+          ];
+
+          involvedSockets.forEach((socket) => {
+            socket.readyState === socket.OPEN &&
+              socket?.send(JSON.stringify(payload));
+          });
+        }
         break;
       case "delete_message":
-        conversation?.members?.forEach((member) => {
-          const ws = clients.get(member);
-          setTimeout(() => {
-            ws?.send(
-              JSON.stringify({
-                type: "delete_message",
-                message: json.message,
-                read: false,
-                message_id: json.message_id,
-                conversation_id: json.conversation_id,
-                sender_id: json.sender_id,
-              })
-            );
-          }, 1000);
-        });
+        {
+          const payload = {
+            type: "delete_message",
+            message_id: json.message_id,
+            deviceId: webSocket.deviceId,
+          };
+
+          const response = await fetch(`${BACKEND_URL}/messages/delete`, {
+            method: "POST",
+            body: JSON.stringify({
+              message_id: payload.message,
+            }),
+            headers: {
+              "content-type": "application/json",
+            },
+          });
+
+          const data = await response.data;
+
+          const involvedSockets = [
+            clients.get(data.data.conversation_user_id),
+            clients.get(data.data.conversation_admin_id),
+          ];
+
+          involvedSockets.forEach((socket) => {
+            socket.readyState === socket.OPEN &&
+              socket?.send(JSON.stringify(payload));
+          });
+        }
         break;
       default:
         break;
